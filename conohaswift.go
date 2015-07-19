@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/BurntSushi/toml"
 	"io"
 	"io/ioutil"
 	"net/http"
-	"net/url"
+	"os"
+	"time"
 )
 
 type TokensReq struct {
@@ -84,39 +86,50 @@ type TenantInfo struct {
 }
 
 type Client struct {
-	Client   *http.Client
-	UserName string
-	Password string
-	TenantId string
-	Region   string
-	Token    string
-	SwiftUrl string
-	Expires  string
+	UserName string `toml:"user_name"`
+	Password string `toml:"password"`
+	TenantId string `toml:"tenant_id"`
+	Region   string `toml:"region"`
+	Token    string `toml:"token"`
+	SwiftUrl string `toml:"swift_url"`
+	Expires  string `toml:"expires"`
 }
 
-func (c *Client) PostTokens() error {
+func NewClient(fpath string) (Client, error) {
+	var c Client
+	_, err := toml.DecodeFile(fpath, &c)
+	if err != nil {
+		return c, err
+	}
+	now := time.Now().UTC()
+	expires, err := time.Parse(time.RFC3339, c.Expires)
+	fmt.Println(now, expires)
+	if err == nil && now.Before(expires) {
+		return c, nil
+	}
+	fmt.Println("reget")
+	url := fmt.Sprintf("https://identity.%s.conoha.io/v2.0/tokens", c.Region)
 	a := TokensReq{Credentials{UserPass{c.UserName, c.Password}, c.TenantId}}
 	b, err := json.Marshal(a)
 	if err != nil {
-		return err
+		return c, err
 	}
-	url := fmt.Sprintf("https://identity.%s.conoha.io/v2.0/tokens", c.Region)
 	req, _ := http.NewRequest("POST", url, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
-	c.Client = &http.Client{}
-	res, err := c.Client.Do(req)
+	client := &http.Client{}
+	res, err := client.Do(req)
 	defer res.Body.Close()
 	if err != nil {
-		return err
+		return c, err
 	}
 	if res.StatusCode != 200 {
-		return fmt.Errorf("StatusCode %v", res.StatusCode)
+		return c, fmt.Errorf("%s (%v)", http.StatusText(res.StatusCode), res.StatusCode)
 	}
 	resbody, _ := ioutil.ReadAll(res.Body)
 	var tokensRes TokensRes
 	err = json.Unmarshal(resbody, &tokensRes)
 	if err != nil {
-		return err
+		return c, err
 	}
 	catalogList := tokensRes.Access.ServiceCatalog
 	var publicUrl string
@@ -132,84 +145,103 @@ func (c *Client) PostTokens() error {
 	c.SwiftUrl = publicUrl
 	c.Token = tokensRes.Access.Token.Id
 	c.Expires = tokensRes.Access.Token.Expires
-	return nil
+
+	buf := new(bytes.Buffer)
+	if err := toml.NewEncoder(buf).Encode(c); err != nil {
+		return c, err
+	}
+	ioutil.WriteFile(fpath, buf.Bytes(), os.ModePerm)
+
+	return c, nil
 }
 
-//
-// https://www.conoha.jp/docs/swift-show_account_details_and_list_containers.html
-//
-func (c *Client) ShowAccount() (http.Header, error) {
-	req, _ := http.NewRequest("GET", c.SwiftUrl, nil)
-	req.Header.Set("X-Auth-Token", c.Token)
-	res, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	switch res.StatusCode {
-	case 200, 204:
-	default:
-		return nil, fmt.Errorf("StatusCode %v", res.StatusCode)
-	}
-	return res.Header, nil
-}
-
-//
-// https://www.conoha.jp/docs/swift-set_account_quota.html
-//
-func (c *Client) SetAccountQuota(gBytes string) (http.Header, error) {
-	req, _ := http.NewRequest("POST", c.SwiftUrl, nil)
-	req.Header.Set("X-Auth-Token", c.Token)
-	req.Header.Set("X-Account-Meta-Quota-Giga-Bytes", gBytes)
-
-	res, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	switch res.StatusCode {
-	case 204:
-	default:
-		return nil, fmt.Errorf("StatusCode %v", res.StatusCode)
-	}
-	return res.Header, nil
-}
-
-//
-// https://www.conoha.jp/docs/swift-show_container_details_and_list_objects.html
-//
-func (c *Client) ShowContainer(container string) (http.Header, error) {
-	url := fmt.Sprintf("%s/%s", c.SwiftUrl, container)
-	req, _ := http.NewRequest("GET", url, nil)
-	req.Header.Set("X-Auth-Token", c.Token)
-
-	res, err := c.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	switch res.StatusCode {
-	case 200, 204:
-	default:
-		return nil, fmt.Errorf("StatusCode %v", res.StatusCode)
-	}
-	return res.Header, nil
-}
-
-//
-// https://www.conoha.jp/docs/swift-create_container.html
-//
-func (c *Client) CreateContainer(container string) (http.Header, error) {
-	url := fmt.Sprintf("%s/%s", c.SwiftUrl, container)
+func (c *Client) request(method string, path string, code []int, header http.Header, body io.Reader) ([]byte, map[string][]string, error) {
+	url := fmt.Sprintf("%s/%s", c.SwiftUrl, path)
 	fmt.Println(url)
-	req, _ := http.NewRequest("PUT", url, nil)
+	req, _ := http.NewRequest(method, url, body)
 	req.Header.Set("X-Auth-Token", c.Token)
+	for k, v := range header {
+		fmt.Println(k, v[0])
+		req.Header.Set(k, v[0])
+	}
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	resbody, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, v := range code {
+		fmt.Println(v)
+		if v == res.StatusCode {
+			return resbody, res.Header, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("%s (%v)", http.StatusText(res.StatusCode), res.StatusCode)
+}
 
-	res, err := c.Client.Do(req)
+func (c *Client) ShowAccount() (http.Header, error) {
+	_, header, err := c.request("GET", "", []int{200, 204}, nil, nil)
+	return header, err
+}
+
+func (c *Client) SetAccountQuota(gBytes string) (http.Header, error) {
+	h := make(http.Header)
+	h.Set("X-Account-Meta-Quota-Giga-Bytes", gBytes)
+	_, header, err := c.request("POST", "", []int{204}, h, nil)
+	return header, err
+}
+
+func (c *Client) ShowContainer(container string) (http.Header, error) {
+	_, header, err := c.request("GET", container, []int{200, 204}, nil, nil)
+	return header, err
+}
+
+func (c *Client) CreateContainer(container string) (http.Header, error) {
+	_, header, err := c.request("PUT", container, []int{201, 204}, nil, nil)
+	return header, err
+}
+
+func (c *Client) DeleteContainer(container string) (http.Header, error) {
+	_, header, err := c.request("DELETE", container, []int{204}, nil, nil)
+	return header, err
+}
+
+func (c *Client) GetObject(container string, object string) (http.Header, error) {
+	uri := fmt.Sprintf("%s/%s", container, object)
+	_, header, err := c.request("GET", uri, []int{200}, nil, nil)
+	return header, err
+}
+
+func (c *Client) ObjectUpload(container string, object string) (http.Header, error) {
+	uri := fmt.Sprintf("%s/%s", container, object)
+	b, err := ioutil.ReadFile(object)
 	if err != nil {
 		return nil, err
 	}
-	switch res.StatusCode {
-	case 201, 204:
-	default:
-		return nil, fmt.Errorf("StatusCode %v", res.StatusCode)
-	}
-	return res.Header, nil
+	_, header, err := c.request("PUT", uri, []int{201}, nil, bytes.NewReader(b))
+	return header, err
+}
+
+func (c *Client) ObjectDownload(container string, object string) ([]byte, error) {
+	uri := fmt.Sprintf("%s/%s", container, object)
+	body, _, err := c.request("GET", uri, []int{200}, nil, nil)
+	return body, err
+}
+
+func (c *Client) DeleteObject(container string, object string) (http.Header, error) {
+	uri := fmt.Sprintf("%s/%s", container, object)
+	_, header, err := c.request("DELETE", uri, []int{204}, nil, nil)
+	return header, err
+}
+
+func (c *Client) CopyObject(fromContainer string, fromObject string, toContainer string, toObject string) (http.Header, error) {
+	fromUri := fmt.Sprintf("%s/%s", fromContainer, fromObject)
+	toUri := fmt.Sprintf("%s/%s", toContainer, toObject)
+	h := make(http.Header)
+	h.Set("Destination", toUri)
+	_, header, err := c.request("COPY", fromUri, []int{204}, h, nil)
+	return header, err
 }
