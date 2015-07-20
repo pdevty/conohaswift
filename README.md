@@ -1,6 +1,6 @@
-# conohaswift
+# conohaswift [![GoDoc](https://godoc.org/github.com/pdevty/conohaswift?status.svg)](https://godoc.org/github.com/pdevty/conohaswift)
 
-Go client for the Conoha Object Storage Service (swift) API
+Go client for the Conoha Object Storage Service (OpenStack Swift) API
 
 ## Installation
 
@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	// new client
 	client, err := conohaswift.NewClient("./conohaswift.tml")
 	if err != nil {
 		panic(err)
@@ -49,6 +50,8 @@ password = "*****"
 tenant_id = "12345"
 region   = "tyo1"
 ```
+
+Refer to [godoc](http://godoc.org/github.com/pdevty/conohaswift) for more infomation.
 
 ## Contributing
 

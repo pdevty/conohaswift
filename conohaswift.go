@@ -96,18 +96,16 @@ type Client struct {
 }
 
 func NewClient(fpath string) (Client, error) {
-	var c Client
+	c := Client{}
 	_, err := toml.DecodeFile(fpath, &c)
 	if err != nil {
 		return c, err
 	}
 	now := time.Now().UTC()
 	expires, err := time.Parse(time.RFC3339, c.Expires)
-	fmt.Println(now, expires)
 	if err == nil && now.Before(expires) {
 		return c, nil
 	}
-	fmt.Println("reget")
 	url := fmt.Sprintf("https://identity.%s.conoha.io/v2.0/tokens", c.Region)
 	a := TokensReq{Credentials{UserPass{c.UserName, c.Password}, c.TenantId}}
 	b, err := json.Marshal(a)
@@ -157,11 +155,9 @@ func NewClient(fpath string) (Client, error) {
 
 func (c *Client) request(method string, path string, code []int, header http.Header, body io.Reader) ([]byte, map[string][]string, error) {
 	url := fmt.Sprintf("%s/%s", c.SwiftUrl, path)
-	fmt.Println(url)
 	req, _ := http.NewRequest(method, url, body)
 	req.Header.Set("X-Auth-Token", c.Token)
 	for k, v := range header {
-		fmt.Println(k, v[0])
 		req.Header.Set(k, v[0])
 	}
 	client := &http.Client{}
@@ -174,7 +170,6 @@ func (c *Client) request(method string, path string, code []int, header http.Hea
 		return nil, nil, err
 	}
 	for _, v := range code {
-		fmt.Println(v)
 		if v == res.StatusCode {
 			return resbody, res.Header, nil
 		}
